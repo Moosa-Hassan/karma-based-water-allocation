@@ -8,15 +8,15 @@ def calculate_demand(
     theta_max: float,
     area_acres: np.ndarray,
     gross_depth_mm: np.ndarray,
-    beta: np.ndarray | float = 1.2,
+    beta: np.ndarray | float = 0.8,
 ) -> np.ndarray:
     """Equation 4: gross water required to restore field capacity."""
     theta = np.asarray(theta, dtype=float)
     area_acres = np.asarray(area_acres, dtype=float)
     gross_depth_mm = np.asarray(gross_depth_mm, dtype=float)
     beta = np.asarray(beta, dtype=float)
-    if np.any(beta < 1) or np.any(area_acres <= 0) or np.any(gross_depth_mm <= 0):
-        raise ValueError("beta must be at least 1 and areas/depths must be positive")
+    if np.any(beta <= 0) or np.any(area_acres <= 0) or np.any(gross_depth_mm <= 0):
+        raise ValueError("beta must be positive and areas/depths must be positive")
     deficit = np.maximum(0.0, theta_max - theta)
     return beta * deficit * area_acres * gross_depth_mm
 
@@ -34,7 +34,11 @@ def calculate_social_value(
     The value combines avoided groundwater expense with the cost of moisture
     stress. This makes the proposed allocation an explicit welfare objective.
     """
-    if groundwater_cost < 0 or stress_weight < 0 or theta_max <= theta_min:
+    if (
+        groundwater_cost < 0
+        or stress_weight < 0
+        or np.any(np.asarray(theta_max) <= np.asarray(theta_min))
+    ):
         raise ValueError("invalid social-value parameters")
     urgency = np.clip((theta_max - np.asarray(theta)) / (theta_max - theta_min), 0.0, 1.0)
     demand = np.asarray(demand, dtype=float)

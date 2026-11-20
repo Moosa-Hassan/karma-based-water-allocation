@@ -5,21 +5,19 @@ farm properties, rainfall, canal supply, groundwater stock, and random seed:
 
 1. **Warabandi**: fixed area-proportional rotations.
 2. **Demand-based**: water is ranked by wheat demand and critical-stage need.
-3. **Proposed Karma system**: Karma bids score social value, and winners make
-   proportional Karma payments redistributed equally across all farmers.
+3. **Proposed pure-Karma system**: Farms rank by Karma bids, winners make
+   proportional Karma payments, and the pool is redistributed equally across
+   all farmers.
 
-The proposed system implements the PBS equations in
-`context/karma_bid_payment_and_societal_redistribution_mechanism.md`.
+The proposed system implements the pure-Karma equations in
+`context/pure_karma_wheat_allocation_with_soil_heterogeneity_and_finite_groundwater.md`.
 Physical wheat behavior follows
-`context/realistic_wheat_simulation_extensions.md`, including staggered sowing,
-harvest shutoff, stage-sensitive stress, and a finite groundwater stock.
+the synchronized wheat season, stage-sensitive stress, and finite groundwater
+stock described in the pure-Karma model.
 
-The simulation applies one irrigation efficiency percentage to every farm.
-The implementation converts it to application loss with:
-
-```text
-beta_n = 100 / irrigation_efficiency_percent_n
-```
+The simulation uses `beta = 0.8` for every farm. Heterogeneity is limited to
+farm-specific minimum and maximum soil-moisture bounds; all crops start at the
+same time and use the same initial relative moisture.
 
 The groundwater pumping cost uses `C_g = 0.10 PKR` per unit, matching the
 original demand-based paper. Drawdown increases this cost using the optional
@@ -48,17 +46,9 @@ Options:
 --weeks         Wheat-season decision intervals
 --canal-supply  Average canal supply depth in mm/week (default: 30)
 --seed          Shared random seed
---efficiency    Irrigation efficiency percentage x (default: 80)
+The simulation fixes `beta = 0.8` for all farms; it is not a CLI option.
 ```
 
-The implementation converts efficiency to the paper's coefficient:
-
-```text
-beta = 100 / x
-```
-
-For example, `--efficiency 70` gives `beta = 1.428571`, and
-`--efficiency 100` gives `beta = 1.0`.
-
-The comparison reports social welfare, groundwater cost and use, cumulative
-unmet demand, and water-received Gini inequality.
+The comparison reports social cost, social welfare, groundwater cost and use,
+and cumulative unmet demand for all three systems. Social cost includes
+groundwater cost, unmet demand, and moisture stress.

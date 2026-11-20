@@ -12,7 +12,7 @@ class SoilMoistureModel:
     root_zone_depth_mm: float = 600.0
     theta_min: float = 0.10
     theta_max: float = 0.25
-    beta: float = 1.2
+    beta: float = 0.8
     percolation_rate: float = 0.01
 
     def __post_init__(self) -> None:
@@ -20,8 +20,8 @@ class SoilMoistureModel:
             raise ValueError("root_zone_depth_mm must be positive")
         if not 0 < self.theta_min < self.theta_max < 1:
             raise ValueError("moisture thresholds must satisfy 0 < min < max < 1")
-        if self.beta < 1 or self.percolation_rate < 0:
-            raise ValueError("beta must be at least 1 and percolation_rate non-negative")
+        if self.beta <= 0 or self.percolation_rate < 0:
+            raise ValueError("beta must be positive and percolation_rate non-negative")
 
     def crop_coefficient(self, progress: np.ndarray) -> np.ndarray:
         """Return Kc using the four wheat growth stages."""
