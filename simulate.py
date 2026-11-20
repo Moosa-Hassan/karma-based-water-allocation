@@ -1,5 +1,4 @@
 """Compatibility entry point for the modular water-allocation simulation."""
-
 import argparse
 import numpy as np
 from simulate.run import run_simulation
@@ -24,6 +23,7 @@ def main() -> None:
         default="all",
     )
     args = parser.parse_args()
+
     mechanisms = (
         ("warabandi", "demand", "proposed")
         if args.mechanism == "all"
@@ -35,6 +35,7 @@ def main() -> None:
         f"{'System':<12} {'Social cost':>12} {'Welfare':>12} "
         f"{'GW cost':>12} {'GW used':>12} {'Unmet':>12}"
     )
+
     for mechanism in mechanisms:
         result = run_simulation(
             num_farmers=args.num_farmers,

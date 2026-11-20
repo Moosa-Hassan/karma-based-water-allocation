@@ -1,231 +1,453 @@
-# Current Project Deliverable
+# First Project Deliverable: Karma-Based Water Allocation
 
-## Overview
+## Project scope
 
-The project currently implements a basic Karma-based water-allocation
-simulation for heterogeneous wheat farmers. It extends the demand-based
-irrigation model described in `water_demand.md` by replacing the paper's VCG
-money auction with Karma bidding and Pay-to-Society (PBS) redistribution.
+This project simulates weekly irrigation allocation for heterogeneous wheat
+farmers sharing canal water and a finite groundwater stock. It compares:
 
-The current implementation is a working simulation demonstration, but it does
-not yet provide a complete formal game formulation, equilibrium analysis, or
-learning algorithm.
+1. **Warabandi:** area-proportional rotational delivery.
+2. **Demand-based allocation:** allocation by a social-value ranking.
+3. **Proposed Karma allocation:** priority by Karma bid and urgency, followed
+   by equal Karma redistribution.
 
-## 1. Game Problem Formulation
+The implemented model is a **non-cooperative repeated game**. Farmers are
+separate decision makers. Coalition values and cooperative cost sharing are
+not implemented.
 
-### Completed
+## 1. Game formulation
 
-The current project identifies the following game components:
+### Players and state
 
-- **Players:** Farmers competing for limited canal water.
-- **State variables:** Soil moisture, Karma balance, calculated water demand,
-  farm area, application efficiency, crop growth rate, and groundwater
-  capacity.
-- **Actions:** Each farmer submits an integer Karma bid not exceeding their
-  current Karma balance.
-- **Allocation rule:** Farmers are ranked using:
+There are \(N\) farmers, \(i \in \{1,\ldots,N\}\). The state at week \(t\)
+contains
 
-  ```text
-  score_i = (bid_i + 1) * demand_i
-  ```
+$$
+s_t =
+\left(
+\theta_{i,t},\theta_i^{wp},\theta_i^{fc},A_i,L_{i,t},
+\kappa_{i,t},G_t
+\right)_{i=1}^{N},
+$$
 
-- **Resources:** Canal water is shared and limited; groundwater is available
-  individually up to each farmer's pumping capacity.
-- **Settlement:** Farmers receiving water pay their bids into a pool. The pool
-  is redistributed among all farmers using integer PBS redistribution.
-- **Physical dynamics:** Soil moisture changes through percolation,
-  evapotranspiration, rainfall, canal water, and groundwater.
-- **Heterogeneity:** Farmers have different areas, application efficiencies,
-  crop growth rates, initial soil moisture, and groundwater capacities.
+where:
 
-These features are implemented in `simulate.py` and described in `README.md`.
+- \(\theta_{i,t}\) is volumetric soil moisture;
+- \(\theta_i^{wp}\) is the farm-specific wilting-point lower bound;
+- \(\theta_i^{fc}\) is the farm-specific field-capacity upper bound;
+- \(A_i\) is farm area in acres;
+- \(L_{i,t}\) is effective wheat root depth;
+- \(\kappa_{i,t}\) is the Karma balance; and
+- \(G_t\) is shared groundwater stock.
 
-### Still Needed
+The simulation samples \(A_i\sim U(5,20)\), \(\theta_i^{wp}\sim U(0.08,0.12)\),
+and \(\theta_i^{fc}\sim U(0.24,0.30)\). It uses
+\(\beta=1.25\), corresponding to 80% application efficiency because
+\(\beta=100/80\). Each farmer starts with 10 Karma points.
 
-The project needs a formal utility function for each farmer. For example, a
-utility function could combine:
+### Hassan et al. equations implemented in `demand.py`
+
+The following equations are explicitly implemented from Hassan et al. (2021).
+
+**Equation 4: physical water demand**
+
+$$
+d_i(t)=
+\beta\max\left(0,\theta_i^{fc}(t)-\theta_i(t)\right)A_iL_i(t).
+$$
+
+In code, `calculate_demand()` returns demand in acre-mm.
+
+**Equation 6: true per-unit valuation**
+
+$$
+v_i(t)=C_g\frac{d_i(t)}{A_i},
+$$
+
+where \(C_g\) is the groundwater cost per unit. This is implemented by
+`calculate_monetary_willingness()`.
+
+**Equation 7: willingness-to-pay/bid quantity**
+
+$$
+p_i(t)=\widehat{v}_i(t)d_i(t).
+$$
+
+This is implemented by `calculate_willingness_to_pay()`. The helper
+`truthful_bid()` sets \(\widehat{v}_i=v_i\).
+
+These Eq. 6 and Eq. 7 functions are available for the VCG-style valuation
+experiment, but the current demand and Karma mechanisms do not use monetary
+payments.
+
+### Project welfare extension
+
+The following value is a project extension, not an equation from Hassan et
+al. It combines groundwater avoidance with normalized soil-moisture urgency:
+
+$$
+\operatorname{value}_i(t)
+=
+C_g\mathbf{1}_{\{d_i(t)>0\}}
++w_i(t)
+\left[
+\operatorname{clip}\left(
+\frac{\theta_i^{fc}-\theta_i}
+{\theta_i^{fc}-\theta_i^{wp}},0,1
+\right)
+\right]d_i(t).
+$$
+
+This is implemented by `calculate_social_value()` and is used in the
+reported welfare accounting. The demand mechanism uses a separate allocation
+score:
+
+$$
+\operatorname{score}_i(t)
+=d_i(t)w_i^{stage}(t)+100\mathbf{1}_{\{\text{active}_i(t)\}}.
+$$
+
+The function `allocate_social_welfare()` greedily allocates canal water to
+the largest scores subject to
+
+$$
+0\leq x_i(t)\leq d_i(t),
+\qquad
+\sum_i x_i(t)\leq S_t.
+$$
+
+### Actions and Karma mechanism
+
+The strategic action is an integer Karma bid:
+
+$$
+a_i(t)=b_i(t),\qquad 0\leq b_i(t)\leq\kappa_i(t).
+$$
+
+The implemented Karma policy uses urgency
+
+$$
+u_i(t)=w_i^{stage}(t)
+\operatorname{clip}\left(
+\frac{\theta_i^{fc}-\theta_i}
+{\theta_i^{fc}-\theta_i^{wp}},0,1
+\right),
+$$
+
+and bids
+
+$$
+b_i(t)=
+\min\left[
+\kappa_i(t),
+\left\lfloor0.30u_i(t)\kappa_i(t)\right\rfloor
+\right].
+$$
+
+Farmers are ordered by descending bid, then urgency, then farmer index.
+Canal water is allocated top-down:
+
+$$
+x_i(t)=
+\min\left[
+d_i(t),
+\max\left(0,S_t-\sum_{j\text{ before }i}x_j(t)\right)
+\right].
+$$
+
+For a farmer receiving water, the proportional Karma payment is
+
+$$
+p_i^{K}(t)=
+\operatorname{round}\left(
+b_i(t)\frac{x_i(t)}{\max(d_i(t),10^{-12})}
+\right).
+$$
+
+The collected pool \(P_t=\sum_i p_i^K(t)\) is redistributed as evenly as
+possible across all farmers:
+
+$$
+\kappa_i(t+1)=
+\max\left(0,\kappa_i(t)-p_i^K(t)+r_i(P_t,N,t)\right),
+$$
+
+where \(r_i\) is the integer redistribution share. The implementation rotates
+the starting index for any remainder.
+
+### Warabandi allocation
+
+The turn schedule is area proportional:
+
+$$
+T_i=
+\left(
+\frac{168-\sum_iT_{fill,i}+\sum_iT_{drain,i}}
+{\sum_iA_i}
+\right)A_i
++T_{fill,i}-T_{drain,i}.
+$$
+
+The scheduled depth is converted to acre-mm and capped by demand. This is
+implemented by `WarabandiMechanism`.
+
+## 2. Wheat and soil-water dynamics
+
+### Wheat development
+
+Crop age is measured in weeks and converted to progress by
+
+$$
+\operatorname{progress}_t=\operatorname{clip}\left(\frac{t}{24},0,1\right).
+$$
+
+The wheat crop coefficient \(K_c\) follows four FAO-56-inspired stages:
+
+- initial stage: \(K_c=0.4\);
+- development: linear ramp from \(0.4\) to \(1.15\);
+- mid-season: \(K_c=1.15\);
+- late season: linear decline from \(1.15\) to \(0.3\).
+
+Root depth is
+
+$$
+L_t=800\operatorname{clip}\left(\frac{t}{8},0.25,1\right)\text{ mm}.
+$$
+
+The simulation has synchronized crop age for all farmers. It does not yet
+calculate biomass, yield, or profit.
+
+### Soil-water bucket model
+
+The current implementation is in `SoilMoistureModel.update()`. Canal and
+groundwater deliveries are first converted from acre-mm to depth:
+
+$$
+I_{i,t}=\frac{x_{i,t}+g_{i,t}}{A_i}.
+$$
+
+The gross irrigation depth is reduced by application inefficiency:
+
+$$
+I^{eff}_{i,t}=\frac{I_{i,t}}{\beta},
+\qquad
+I^{loss}_{i,t}=I_{i,t}-I^{eff}_{i,t}.
+$$
+
+Water in the root zone before drainage is
+
+$$
+W_{i,t}^{pre}
+=\theta_{i,t}L_{i,t}+I^{eff}_{i,t}+R_t,
+$$
+
+where \(R_t\) is rainfall. Drainage above field capacity is
+
+$$
+D_{i,t}
+=c_d\max\left(0,W_{i,t}^{pre}
+-\theta_i^{fc}L_{i,t}\right),
+$$
+
+with \(c_d=0.5\). Total drainage recorded for aquifer recharge also includes
+application loss:
+
+$$
+D_{i,t}^{total}=D_{i,t}+I^{loss}_{i,t}.
+$$
+
+The total and readily available water are
+
+$$
+TAW_{i,t}=(\theta_i^{fc}-\theta_i^{wp})L_{i,t},
+$$
+
+$$
+RAW_{i,t}=W_{i,t}^{post}
+-\theta_i^{wp}L_{i,t},
+$$
+
+where \(W_{i,t}^{post}=W_{i,t}^{pre}-D_{i,t}\).
+
+The water-stress coefficient is
+
+$$
+K_{s,i,t}
+=\operatorname{clip}\left(
+\frac{RAW_{i,t}}{(1-p_{MAD})TAW_{i,t}},0,1
+\right),
+$$
+
+with \(p_{MAD}=0.55\). Actual evapotranspiration is
+
+$$
+ET_{i,t}
+=\min\left(
+K_{s,i,t}K_{c,t}ET_{0,t},
+\max(0,W_{i,t}^{post}-\theta_i^{wp}L_{i,t})
+\right),
+$$
+
+where
+
+$$
+ET_{0,t}=15+\frac{15t}{T}\text{ mm/week}.
+$$
+
+Finally,
+
+$$
+\theta_{i,t+1}
+=\operatorname{clip}\left(
+\frac{W_{i,t}^{post}-ET_{i,t}}{L_{i,t}},
+\theta_i^{wp},\theta_i^{fc}
+\right).
+$$
+
+### Groundwater dynamics
+
+Groundwater pumping is limited by unmet demand, pump capacity, and available
+stock:
+
+$$
+g_{i,t}\leq
+\min\left[
+\max(0,d_{i,t}-x_{i,t}),
+Q_i^{max},
+\max(0,G_t-G_{min})
+\right].
+$$
+
+If aggregate requested pumping exceeds available stock, all individual
+requests are scaled proportionally. Groundwater is recharged by total
+drainage:
+
+$$
+G_{t+1}
+=\max\left[
+G_{min},
+G_t+\eta\sum_iD_{i,t}^{total}A_i-\sum_ig_{i,t}
+\right],
+$$
+
+where \(G_0=5000\), \(G_{min}=500\), and \(\eta=0.20\).
+
+## 3. Social cost and social welfare
+
+The simulation calculates a drawdown-dependent groundwater price:
+
+$$
+C_g(t)=C_{g,0}
+\left[
+1+\alpha
+\operatorname{clip}\left(
+\frac{G_0-G_{t+1}}{G_0},0,1
+\right)
+\right],
+$$
+
+with \(C_{g,0}=0.10\) and \(\alpha=0.50\).
+
+Unmet demand is
+
+$$
+U_{i,t}^{unmet}
+=\max(0,d_{i,t}-x_{i,t}-g_{i,t}),
+$$
+
+and the stress penalty is
+
+$$
+Z_{i,t}=w_i^{stage}(t)(1-K_{s,i,t}).
+$$
+
+The implemented social cost is
+
+$$
+\operatorname{SocialCost}
+=\sum_t\left[
+\sum_i C_g(t)g_{i,t}
++\sum_iU_{i,t}^{unmet}
++\sum_iZ_{i,t}
+\right].
+$$
+
+The implemented social welfare is
+
+$$
+\operatorname{SocialWelfare}
+=\sum_t\left[
+\sum_i\operatorname{value}_i(t)(x_{i,t}+g_{i,t})
+-\sum_iC_g(t)g_{i,t}
+-\sum_iU_{i,t}^{unmet}
+-\sum_iZ_{i,t}
+\right].
+$$
+
+## 4. Preliminary equilibrium analysis
+
+The model is a finite-horizon stochastic repeated game. A stationary Nash
+equilibrium would require each farmer's policy \(\pi_i\) to satisfy
+
+$$
+\pi_i(s)\in
+\arg\max_{b_i\in\{0,\ldots,\kappa_i\}}
+\mathbb{E}\left[
+\sum_{\tau=t}^{T}\delta^{\tau-t}U_{i,\tau}
+\mid s_t=s,b_i,\pi_{-i}
+\right].
+$$
+
+The current code does not compute this fixed point. It evaluates the
+deterministic Karma bidding rule and records its resulting allocation,
+soil-water transition, Karma balances, and welfare. Therefore the numerical
+results are simulation results, not a computed Nash equilibrium or learned
+strategy.
+
+## 5. Simulation demonstration
+
+The command-line entry point is `simulate.py`; the simulation engine is
+`simulate/run.py`. The following result uses one reproducible constrained
+water setup:
+
+| Parameter | Value |
+|---|---:|
+| Farmers | 24 |
+| Decision intervals | 17 weeks |
+| Canal supply | 5 mm/week |
+| Efficiency | 80% |
+| \(\beta\) | 1.25 |
+| Initial groundwater | 5000 |
+| Groundwater floor | 500 |
+| Initial Karma per farmer | 10 |
+| Random seed | 42 |
 
 ```text
-utility_i =
-    crop benefit
-    - groundwater pumping cost
-    - soil-moisture stress penalty
-    - Karma payment or opportunity cost
+python simulate.py --seed 42 --num-farmers 24 --weeks 17 --canal-supply 5 --mechanism all
 ```
 
-The formulation must define:
+| Mechanism | Social cost | Social welfare | Groundwater cost | Groundwater used | Unmet demand |
+|---|---:|---:|---:|---:|---:|
+| Warabandi | 643,077.50 | 2,205,990.01 | 678.79 | 4,738.29 | 642,113.50 |
+| Demand-based | 449,865.05 | 40,278,379.99 | 834.42 | 5,838.20 | 448,857.12 |
+| Proposed Karma | 456,866.22 | 38,786,475.06 | 832.64 | 5,826.08 | 455,876.98 |
 
-- What each farmer is trying to maximize.
-- How water affects crop benefit or yield.
-- How groundwater cost enters utility.
-- How soil-moisture stress is penalized.
-- Whether Karma has direct utility or only represents an opportunity cost.
-- Whether the game is non-cooperative or cooperative.
+These are preliminary results from one seed. They demonstrate the current
+simulation output; they do not establish that one mechanism is optimal.
 
-The current model is naturally a **non-cooperative game**. If a cooperative
-game is required, the project must additionally define:
+## Current implementation status
 
-- Coalition value `V(S)` for every coalition of farmers.
-- The opportunity cost of allocating water to one coalition rather than
-  another.
-- A cost-sharing or benefit-sharing rule.
-- Whether the resulting allocation belongs to the core, Shapley allocation,
-  nucleolus, or another solution concept.
+Implemented:
 
-At present, groundwater cost is tracked as a metric, but it is not yet part of
-an explicit player payoff.
+- Hassan et al. Eq. 4, Eq. 6, and Eq. 7 helper functions;
+- project social-value extension;
+- Warabandi, demand-based, and Karma allocation;
+- wheat \(K_c\), root-depth, stress, soil-water, and groundwater dynamics;
+- social-cost and social-welfare accounting; and
+- reproducible CLI comparison.
 
-## 2. Preliminary Equilibrium Analysis
+Not implemented:
 
-### Completed
-
-The project has identified the relevant repeated-game structure:
-
-- Farmers repeatedly choose Karma bids.
-- Karma balances change after every allocation.
-- A farmer's current bid affects both current water access and future bidding
-  power.
-- PBS redistribution conserves total Karma while redistributing purchasing
-  power over time.
-
-The project documentation also identifies stationary policies, value
-iteration, and fictitious play as possible approaches to computing strategies.
-
-### Still Needed
-
-No equilibrium is currently computed by the implementation. The current bid
-rule is a fixed heuristic:
-
-```text
-bid_i = min(Karma_i, floor(0.3 * urgency_i * Karma_i))
-```
-
-The project still needs:
-
-1. A precise definition of equilibrium.
-
-   A suitable definition would be a stationary Nash equilibrium in which no
-   farmer can improve expected discounted utility by unilaterally changing
-   their bidding policy.
-
-2. A defined state space.
-
-   Soil moisture and Karma will likely need to be discretized into finite
-   states.
-
-3. A defined action space.
-
-   Each action can be an integer bid from zero to the farmer's current Karma
-   balance.
-
-4. A transition and reward model.
-
-   The transition must include water allocation, soil-moisture evolution,
-   groundwater use, Karma settlement, rainfall, and crop growth.
-
-5. An equilibrium-computation method.
-
-   Candidate methods include:
-
-   - Value iteration for a simplified Markov game.
-   - Fictitious play over farmer bidding policies.
-   - Best-response iteration.
-   - Reinforcement learning for larger state spaces.
-
-6. A convergence criterion.
-
-   For example, stop when the maximum change in policy or value function is
-   below a specified tolerance.
-
-7. An interpretation of the resulting equilibrium.
-
-   The analysis should explain whether equilibrium produces efficient water
-   use, fair access, lower groundwater pumping, or persistent strategic
-   underbidding.
-
-The current project has no implemented value iteration, fictitious play,
-reinforcement learning, best-response solver, or equilibrium convergence
-analysis.
-
-## 3. Simulation Demonstration and Preliminary Results
-
-### Completed
-
-The current simulation provides a basic demonstration with:
-
-- Multiple heterogeneous farmers.
-- Weekly soil-moisture evolution.
-- Wheat crop coefficients and evapotranspiration.
-- Random rainfall.
-- Fixed canal supply.
-- Individual groundwater pumping limits.
-- Demand calculated from soil-moisture deficits.
-- Karma bids and score-based canal allocation.
-- PBS Karma redistribution.
-- Groundwater volume and cost tracking.
-- Final soil-moisture variance.
-- Plots of soil moisture and Karma balances.
-
-The simulation can be run with different farmer counts, time horizons, canal
-supplies, and random seeds.
-
-### Still Needed
-
-The preliminary-results section needs to be expanded into a reproducible
-experiment. It should include:
-
-- A clearly specified baseline parameter set.
-- Multiple random seeds rather than one illustrative run.
-- Mean and standard deviation of results.
-- Total groundwater use and cost.
-- Total unmet demand.
-- Soil-moisture stress over time.
-- Water-access inequality, such as a Gini coefficient.
-- Karma inequality and convergence behavior.
-- Cumulative water received by each farmer.
-- Crop benefit or yield if utility includes production.
-
-The project should also implement and compare baseline mechanisms using the
-same farmer states, rainfall, canal supply, and random seeds:
-
-1. Karma allocation.
-2. Demand-only allocation.
-3. Equal splitting.
-4. Random allocation.
-5. Warabandi rotation.
-6. VCG allocation.
-7. Omniscient urgency allocation.
-
-The current simulation prints and plots results, but it does not yet produce a
-formal comparison table or demonstrate that the Karma strategy is optimal.
-
-## Current Completion Summary
-
-| Requirement | Current status |
-|---|---|
-| Players and actions | Implemented at a basic level |
-| State variables and allocation rule | Implemented |
-| Heterogeneous farmer parameters | Implemented |
-| Formal utility functions | Not yet implemented |
-| Coalition values and cooperative cost sharing | Not implemented |
-| Equilibrium definition | Not yet formalized |
-| Equilibrium computation | Not implemented |
-| Basic simulation demonstration | Implemented |
-| Preliminary output | Basic printouts and plots implemented |
-| Learning algorithm | Described as future work, not implemented |
-| Baseline comparisons | Not implemented |
-| Statistical preliminary results | Not implemented |
-
-## Required Next Steps
-
-The most important next steps are:
-
-1. Choose and formalize the farmer utility function.
-2. Confirm whether the project is non-cooperative or cooperative.
-3. Define the equilibrium concept and state/action discretization.
-4. Implement a small equilibrium solver, preferably value iteration or
-   fictitious play for the basic setup.
-5. Add at least one baseline mechanism.
-6. Run repeated experiments across multiple seeds.
-7. Report efficiency, fairness, utility, and convergence results.
-
+- a learning algorithm;
+- a numerical equilibrium solver;
+- crop yield or profit dynamics; and
+- multi-seed statistical evaluation.

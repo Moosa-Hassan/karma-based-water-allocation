@@ -1,13 +1,12 @@
 """Three-system wheat simulation: Warabandi, demand-based, and Karma welfare."""
-
 from dataclasses import dataclass
-
 import numpy as np
-
 from .demand import calculate_demand, calculate_social_value
-from .proposed import allocate_karma, allocate_social_welfare
 from .soil_moisture import SoilMoistureModel
-from .warabandi import allocate_warabandi, calculate_turn_schedule
+from .mechanism import Mechanism
+from .warabandi import WarabandiMechanism
+from .demand import DemandMechanism
+from .proposed import ProposedMechanism
 
 
 @dataclass
@@ -27,30 +26,41 @@ class SimulationResult:
 
 def run_simulation(
     num_farmers: int = 24,
-    weeks: int = 24,
+    weeks: int = 17,
     canal_supply_mm: float = 30.0,
     seed: int = 42,
     mechanism: str = "proposed",
-    beta: float = 0.8,
+    beta: float = 1.25,
 ) -> SimulationResult:
     """Run a reproducible wheat season under one of three mechanisms."""
     if num_farmers < 1 or weeks < 1 or canal_supply_mm < 0:
         raise ValueError("num_farmers and weeks must be positive; supply must be non-negative")
-    if beta <= 0:
-        raise ValueError("beta must be positive")
+    if beta < 1.0:
+        raise ValueError("beta must be >= 1 (Hassan et al.: beta = 100/x for x% efficiency)")
     if mechanism not in {"warabandi", "demand", "proposed"}:
         raise ValueError("mechanism must be 'warabandi', 'demand', or 'proposed'")
 
     rng = np.random.default_rng(seed)
     model = SoilMoistureModel(root_zone_depth_mm=800.0, beta=beta)
+
+    # Initialize environment
     area = rng.uniform(5.0, 20.0, num_farmers)
-    theta_min = rng.uniform(0.08, 0.12, num_farmers)
-    theta_max = rng.uniform(0.22, 0.28, num_farmers)
-    theta = (theta_min + theta_max) / 2.0
+    theta_wp = rng.uniform(0.08, 0.12, num_farmers)
+    theta_fc = rng.uniform(0.24, 0.30, num_farmers)
+    theta = (theta_wp + theta_fc) / 2.0
     beta_values = np.full(num_farmers, beta, dtype=float)
-    pump_capacity = rng.uniform(40.0, 80.0, num_farmers)
-    turn_hours = calculate_turn_schedule(area)
-    karma = np.full(num_farmers, 10, dtype=int)
+    pump_capacity = rng.uniform(400.0, 800.0, num_farmers)  # acre-mm (scaled by area)
+
+    # Instantiate the chosen mechanism
+    if mechanism == "warabandi":
+        mech = WarabandiMechanism(num_farmers, area)
+    elif mechanism == "demand":
+        mech = DemandMechanism(num_farmers, area)
+    else:
+        mech = ProposedMechanism(num_farmers, area)
+
+    # Initialize state and aquifer
+    state = {'karma': np.full(num_farmers, 10, dtype=int)}
 
     groundwater_stock = 5000.0
     groundwater_initial = groundwater_stock
@@ -59,109 +69,107 @@ def run_simulation(
     groundwater_cost_base = 0.10
     drawdown_alpha = 0.50
 
+    # History trackers
     moisture_history = [theta.copy()]
     surface_history = []
     groundwater_history = []
     unmet_history = []
     stress_history = []
-    karma_history = [karma.copy()]
+    karma_history = [state['karma'].copy()]
     groundwater_stock_history = [groundwater_stock]
+
     social_welfare = 0.0
     groundwater_cost = 0.0
     social_cost = 0.0
     canal_supply_acre_mm = canal_supply_mm * float(np.sum(area))
 
+    # Weekly simulation loop
     for week in range(1, weeks + 1):
-        rainfall = float(rng.exponential(5.0) if rng.random() > 0.70 else 0.0)
+        rainfall_mm = float(rng.exponential(5.0) if rng.random() > 0.70 else 0.0)
         crop_age = np.full(num_farmers, week, dtype=float)
         active = crop_age < 24
-
         root_depth = model.wheat_root_depth_mm(crop_age)
-        demand = calculate_demand(
-            theta,
-            theta_max,
-            area,
-            root_depth,
-            beta_values,
-        )
+
+        # Calculate physical demand (acre-mm)
+        demand = calculate_demand(theta, theta_fc, area, root_depth, beta_values)
         demand[~active] = 0.0
 
+        # Calculate social value for accounting
         value = calculate_social_value(
-            theta,
-            theta_min,
-            theta_max,
-            demand,
-            groundwater_cost_base,
-            stress_weight=1.0,
+            theta, theta_wp, theta_fc, demand, groundwater_cost_base, stress_weight=1.0
         )
         stage_weight = model.stress_weight(crop_age)
 
-        if mechanism == "warabandi":
-            surface = allocate_warabandi(
-                demand,
-                turn_hours,
-                canal_supply_acre_mm / 168.0,
-            )[0]
-        elif mechanism == "demand":
-            surface = allocate_social_welfare(
-                demand,
-                demand * stage_weight + 100.0 * active,
-                canal_supply_acre_mm,
-            )[0]
-        else:
-            surface, payment, karma, karma_bid = allocate_karma(
-                demand,
-                karma,
-                canal_supply_acre_mm,
-                week,
-                urgency=stage_weight * np.maximum(
-                    0.0,
-                    (theta_max - theta) / (theta_max - theta_min),
-                ),
-            )
-            _ = payment, karma_bid
+        # Allocation (delegated to the mechanism)
+        surface, state = mech.allocate(
+            demand=demand,
+            canal_supply=canal_supply_acre_mm,
+            week=week,
+            theta=theta,
+            theta_min=theta_wp,
+            theta_max=theta_fc,
+            stage_weight=stage_weight,
+            active=active,
+            state=state
+        )
+        karma = state['karma']
 
+        # Groundwater pumping
         unmet_before_groundwater = np.maximum(0.0, demand - surface)
         available = max(0.0, groundwater_stock - groundwater_floor)
         groundwater = np.minimum(unmet_before_groundwater, pump_capacity)
         groundwater = np.minimum(groundwater, available)
+
         groundwater_total = float(np.sum(groundwater))
         if groundwater_total > available and groundwater_total > 0:
             groundwater *= available / groundwater_total
 
-        kc = model.wheat_coefficients(crop_age)
-        et0 = 15.0 + 15.0 * week / weeks
-        theta = theta * np.exp(-model.percolation_rate)
-        theta -= kc * et0 / model.root_zone_depth_mm
-        theta += ((surface + groundwater) / beta + rainfall) / model.root_zone_depth_mm
-        theta = np.clip(theta, theta_min, theta_max)
+        # Soil moisture dynamics
+        # Convert surface and groundwater from acre-mm to mm (depth)
+        irrigation_mm = (surface + groundwater) / area
+        rainfall_array = np.full(num_farmers, rainfall_mm)
 
-        percolation = np.maximum(0.0, model.percolation_rate * theta)
-        recharge = percolation_efficiency * float(np.sum(percolation * area * root_depth))
+        balance = model.update(
+            theta=theta,
+            irrigation_mm=irrigation_mm,
+            rainfall_mm=rainfall_array,
+            root_depth_mm=root_depth,
+            crop_age_weeks=crop_age,
+            total_weeks=weeks,
+            week=week,
+        )
+        theta = balance.theta
+
+        # Aquifer recharge (acre-mm)
+        recharge = percolation_efficiency * float(np.sum(balance.drainage_mm * area))
+
         groundwater_stock = max(
             groundwater_floor,
             groundwater_stock + recharge - np.sum(groundwater),
         )
+
+        # Accounting and costs
         drawdown = np.clip(
-            (groundwater_initial - groundwater_stock) / groundwater_initial,
-            0.0,
-            1.0,
+            (groundwater_initial - groundwater_stock) / groundwater_initial, 0.0, 1.0
         )
         current_cost = groundwater_cost_base * (1.0 + drawdown_alpha * drawdown)
         groundwater_cost += float(current_cost * np.sum(groundwater))
 
         total_water = surface + groundwater
         unmet = np.maximum(0.0, demand - total_water)
-        stress = stage_weight * np.maximum(0.0, theta_min - theta)
-        social_cost += float(
-            np.sum(current_cost * groundwater)
-            + np.sum(unmet)
-            + np.sum(stress)
-        )
-        social_welfare += float(np.sum(value * total_water) - np.sum(
-            current_cost * groundwater
-        ) - np.sum(unmet) - np.sum(stress))
+        stress = stage_weight * (1.0 - balance.ks)  # Water-stress penalty
 
+        social_cost += float(
+            np.sum(current_cost * groundwater) + np.sum(unmet) + np.sum(stress)
+        )
+        social_welfare += float(
+            np.sum(value * total_water)
+            - np.sum(current_cost * groundwater)
+            - np.sum(unmet)
+            - np.sum(stress)
+        )
+
+        # Update histories
         surface_history.append(surface)
         groundwater_history.append(groundwater)
         moisture_history.append(theta.copy())
